@@ -1,0 +1,18 @@
+# VMware and virtual-machine runtime files
+*.vmdk
+*.vmdk.*
+*.vmem
+*.nvram
+*.lck/
+*.scoreboard
+*.log
+
+# Local VMware language resources are intentionally not distributed.
+resources/zh_CN/*.dll
+resources/zh_CN/*.vmsg
+
+# Local backup and staging files
+backups/
+staging/
+*.zip
+

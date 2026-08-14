@@ -1,21 +1,12 @@
-# VMware Workstation 中文界面方案
+# VMware Workstation 中文界面安装辅助
 
-一个面向 Windows 的 VMware Workstation 简体中文界面安装辅助方案。
+本仓库提供 VMware Workstation 中文界面的本地安装、备份和恢复脚本。仓库不包含 VMware 官方安装包、厂商 DLL/VMSG 资源、虚拟机文件或任何个人信息。
 
-项目结构参考了常见的桌面软件中文补丁项目，但本仓库只提供安装、备份、恢复脚本和操作说明，不包含 VMware 官方安装包、厂商 DLL/VMSG 资源、虚拟机磁盘或任何个人信息。
+> 本项目由 OpenAI Codex 协助完成。
 
-## 支持范围
+## 最快安装：双击 BAT
 
-- Windows 上的 VMware Workstation 26.x
-- 简体中文资源目录：`messages\zh_CN`
-- VMware 用户配置：`%APPDATA%\VMware\preferences.ini`
-- 安装前自动备份，支持恢复原始文件
-
-本地验证环境为 VMware Workstation `26.0.0 build-25388281`。不同版本的资源文件可能不兼容，请使用与本机版本匹配的资源包。
-
-## 准备资源
-
-将合法取得的中文资源放入项目目录下的 `resources\zh_CN`：
+先准备与当前 VMware Workstation 主版本匹配、且你已合法取得或获授权使用的中文资源包，将以下文件放入仓库的 `resources\zh_CN`：
 
 ```text
 resources\zh_CN\vmappsdk-zh_CN.dll
@@ -23,78 +14,71 @@ resources\zh_CN\vmui-zh_CN.dll
 resources\zh_CN\vmware.vmsg
 ```
 
-资源文件不会被 Git 跟踪，具体说明见 [resources/README.md](resources/README.md)。
+然后双击 `install-windows.bat`：
 
-## 安装
+- 脚本会自动请求管理员权限；在 Windows 用户账户控制提示中选择“是”。
+- 脚本会自动发现 VMware Workstation 安装目录，不要求修改脚本中的个人路径。
+- 安装前会检查 VMware 相关进程；如果 VMware 或虚拟机仍在运行，脚本会给出错误并退出，不会自动关闭任何进程。
+- 原有 `messages\zh_CN` 和用户语言配置会备份到 `%APPDATA%\VMware\zh-cn-backups`。
 
-先完全退出 VMware Workstation 及正在运行的虚拟机，然后在 PowerShell 中执行：
+如果缺少资源文件或找不到 VMware，脚本会显示具体原因并以非零退出码结束。资源文件不会由本仓库自动下载或生成，也不应提交到公共仓库。
+
+## 预演安装
+
+在命令提示符中运行：
+
+```bat
+install-windows.bat /dry-run
+```
+
+`/dry-run` 会执行 VMware、进程和资源检查，并显示 PowerShell 的 `WhatIf` 预演信息，但不会创建备份、删除目录、复制资源或修改 `preferences.ini`。它同样会执行管理员权限检查，以便尽早发现实际安装权限问题。
+
+## 高级 PowerShell 用法
+
+在已提升权限的 Windows PowerShell 5.1 窗口中运行：
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\Set-VmwareZhCn.ps1 -Action Install
+```
+
+不传 `-VmwareRoot` 时，脚本会从公开的 Program Files 目录、Windows 注册表和 `PATH` 自动发现包含 `vmware.exe` 的 VMware Workstation 目录。不传 `-SourceLocalePath` 时，脚本使用仓库中的 `resources\zh_CN`。显式参数仍然兼容：
+
+```powershell
 .\scripts\Set-VmwareZhCn.ps1 `
   -Action Install `
   -VmwareRoot "C:\Program Files (x86)\VMware\VMware Workstation" `
   -SourceLocalePath ".\resources\zh_CN"
 ```
 
-如果 VMware 安装在自定义目录，请将 `-VmwareRoot` 改为包含 `vmware.exe` 的目录。
-
-建议先执行预览，不会修改文件：
+直接使用 PowerShell 预演：
 
 ```powershell
-.\scripts\Set-VmwareZhCn.ps1 `
-  -Action Install `
-  -VmwareRoot "C:\Program Files (x86)\VMware\VMware Workstation" `
-  -SourceLocalePath ".\resources\zh_CN" `
-  -WhatIf
+.\scripts\Set-VmwareZhCn.ps1 -Action Install -WhatIf
 ```
-
-安装脚本会：
-
-- 检查 VMware 进程是否已经退出
-- 校验三个中文资源文件是否齐全
-- 将原有 `messages\zh_CN` 和用户配置备份到 `%APPDATA%\VMware\zh-cn-backups`
-- 安装中文资源
-- 将 `pref.locale` 设置为 `zh_CN`
-
-完成后重新打开 VMware Workstation。如果界面没有切换，先退出 VMware，再重新运行安装脚本或检查资源包版本。
-
-## 恢复原状
 
 恢复最近一次备份：
 
 ```powershell
-.\scripts\Set-VmwareZhCn.ps1 `
-  -Action Restore `
-  -VmwareRoot "C:\Program Files (x86)\VMware\VMware Workstation"
+.\scripts\Set-VmwareZhCn.ps1 -Action Restore
 ```
 
-也可以通过 `-BackupPath` 指定某个备份目录。恢复前同样需要退出 VMware Workstation。
+也可以使用 `-BackupPath` 指定备份目录。恢复前同样需要退出 VMware Workstation 和正在运行的虚拟机。
 
-## 桥接网络与 VPN 说明
+## 版本和安全注意事项
 
-如果虚拟机需要使用当前局域网地址，可以在 VMware 的虚拟机设置中选择：
-
-`Network Adapter` → `Bridged` → `Replicate physical network connection state`
-
-桥接应选择实际联网的物理网卡。仅在主机上运行的三层 VPN 通常不会自动把 VPN 路由继承给桥接虚拟机；如果虚拟机必须经过该 VPN，优先考虑在虚拟机内运行 VPN，或使用明确支持局域网转发的主机代理/路由方案。不要在公开文档中写入真实 IP、用户名、密码或私有密钥。
-
-## 注意事项
-
-- VMware 更新可能覆盖 `messages\zh_CN` 或改变资源格式，更新后需要重新验证资源包。
-- 不要混用不同 VMware 主版本的中文 DLL/VMSG 文件。
-- 本项目不修改 VMware 服务端数据，也不包含 VMware 官方软件。
+- 资源文件必须与 VMware Workstation 主版本匹配，不要混用不同版本的 DLL 或 VMSG 文件。
+- VMware 更新后可能覆盖 `messages\zh_CN`，需要重新验证并安装匹配的资源包。
+- 本项目不修改 VMware 服务端数据，也不包含个人凭据或第三方宣传内容。
 - VMware 是 Broadcom Inc. 的商标。本项目与 VMware/Broadcom 无关联。
 
 ## 目录说明
 
 ```text
-resources/README.md              中文资源放置说明
-scripts/Set-VmwareZhCn.ps1      安装、备份、恢复脚本
-docs/bridge-network-vpn.md      桥接网络与 VPN 注意事项
+install-windows.bat          双击安装入口和管理员提权
+resources/README.md          中文资源放置说明
+scripts/Set-VmwareZhCn.ps1  安装、备份、恢复脚本
 ```
 
 ## 开源许可
 
 本仓库中的脚本和说明以 MIT License 发布。VMware 官方软件及其资源文件不属于本仓库的授权范围。
-

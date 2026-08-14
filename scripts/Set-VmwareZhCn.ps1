@@ -1,10 +1,9 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [ValidateSet('Install', 'Restore')]
     [string]$Action = 'Install',
 
-    [Parameter(Mandatory = $true)]
     [string]$VmwareRoot,
 
     [string]$SourceLocalePath,
@@ -31,15 +30,167 @@ function Resolve-FullPath {
     return [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
 }
 
-function Assert-VmwareRoot {
-    param([Parameter(Mandatory = $true)][string]$Root)
+function Add-VmwareCandidate {
+    param(
+        [Parameter(Mandatory = $true)][System.Collections.Generic.List[string]]$Candidates,
+        [AllowEmptyString()][string]$Candidate
+    )
 
-    $resolvedRoot = Resolve-FullPath $Root
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        return
+    }
+
+    $candidatePath = $Candidate.Trim().Trim('"')
+    if ($candidatePath -match '^\s*"([^"]+)"') {
+        $candidatePath = $Matches[1]
+    }
+
+    try {
+        if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+            if ([System.IO.Path]::GetFileName($candidatePath) -ieq 'vmware.exe') {
+                $candidatePath = Split-Path -LiteralPath $candidatePath -Parent
+            }
+        }
+
+        $resolvedCandidate = Resolve-FullPath $candidatePath
+        $vmwareExe = Join-Path $resolvedCandidate 'vmware.exe'
+        if (-not (Test-Path -LiteralPath $vmwareExe -PathType Leaf)) {
+            return
+        }
+
+        foreach ($existing in $Candidates) {
+            if ([string]::Equals($existing, $resolvedCandidate, [System.StringComparison]::OrdinalIgnoreCase)) {
+                return
+            }
+        }
+        $Candidates.Add($resolvedCandidate)
+    } catch {
+        return
+    }
+}
+
+function Find-VmwareRoot {
+    $candidates = New-Object 'System.Collections.Generic.List[string]'
+
+    foreach ($basePath in @(
+        [Environment]::GetEnvironmentVariable('ProgramW6432'),
+        [Environment]::GetEnvironmentVariable('ProgramFiles'),
+        [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    )) {
+        if (-not [string]::IsNullOrWhiteSpace($basePath)) {
+            Add-VmwareCandidate -Candidates $candidates -Candidate (Join-Path $basePath 'VMware\VMware Workstation')
+        }
+    }
+
+    $registryLocations = @(
+        'HKLM:\SOFTWARE\VMware, Inc.\VMware Workstation',
+        'HKLM:\SOFTWARE\WOW6432Node\VMware, Inc.\VMware Workstation'
+    )
+    foreach ($registryLocation in $registryLocations) {
+        try {
+            $registryItem = Get-ItemProperty -LiteralPath $registryLocation -ErrorAction Stop
+            foreach ($propertyName in @('InstallPath', 'InstallDir', 'Path')) {
+                $property = $registryItem.PSObject.Properties[$propertyName]
+                if ($null -ne $property) {
+                    Add-VmwareCandidate -Candidates $candidates -Candidate ([string]$property.Value)
+                }
+            }
+        } catch {
+            continue
+        }
+    }
+
+    $appPathLocations = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\vmware.exe',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\vmware.exe'
+    )
+    foreach ($appPathLocation in $appPathLocations) {
+        try {
+            $registryItem = Get-Item -LiteralPath $appPathLocation -ErrorAction Stop
+            Add-VmwareCandidate -Candidates $candidates -Candidate ([string]$registryItem.GetValue(''))
+        } catch {
+            continue
+        }
+    }
+
+    foreach ($uninstallRoot in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
+    )) {
+        try {
+            foreach ($entry in Get-ChildItem -LiteralPath $uninstallRoot -ErrorAction Stop) {
+                try {
+                    $uninstallItem = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction Stop
+                    $displayNameProperty = $uninstallItem.PSObject.Properties['DisplayName']
+                    $installLocationProperty = $uninstallItem.PSObject.Properties['InstallLocation']
+                    if ($null -ne $displayNameProperty -and $null -ne $installLocationProperty -and
+                        ([string]$displayNameProperty.Value) -like 'VMware Workstation*') {
+                        Add-VmwareCandidate -Candidates $candidates -Candidate ([string]$installLocationProperty.Value)
+                    }
+                } catch {
+                    continue
+                }
+            }
+        } catch {
+            continue
+        }
+    }
+
+    try {
+        $command = Get-Command -Name 'vmware.exe' -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($null -ne $command) {
+            $commandPathProperty = $command.PSObject.Properties['Path']
+            $commandPath = if ($null -ne $commandPathProperty) { $commandPathProperty.Value } else { $command.Source }
+            Add-VmwareCandidate -Candidates $candidates -Candidate ([string]$commandPath)
+        }
+    } catch {
+        # PATH 查询失败时继续使用其他公开安装位置。
+    }
+
+    return $candidates | Select-Object -First 1
+}
+
+function Assert-VmwareRoot {
+    param([AllowEmptyString()][string]$Root)
+
+    $resolvedRoot = if ([string]::IsNullOrWhiteSpace($Root)) {
+        Find-VmwareRoot
+    } else {
+        Resolve-FullPath $Root
+    }
+
+    if ([string]::IsNullOrWhiteSpace($resolvedRoot)) {
+        throw '未找到 VMware Workstation 安装目录。请确认 VMware 已安装，或使用 -VmwareRoot 指定包含 vmware.exe 的目录。'
+    }
+
     $vmwareExe = Join-Path $resolvedRoot 'vmware.exe'
     if (-not (Test-Path -LiteralPath $vmwareExe -PathType Leaf)) {
-        throw "未找到 vmware.exe：$resolvedRoot"
+        if ([string]::IsNullOrWhiteSpace($Root)) {
+            throw "未找到 VMware Workstation 安装目录。请确认 VMware 已安装，或使用 -VmwareRoot 指定包含 vmware.exe 的目录。自动发现路径：$resolvedRoot"
+        }
+        throw "未找到 vmware.exe：$resolvedRoot。请将 -VmwareRoot 指向包含 vmware.exe 的目录。"
     }
     return $resolvedRoot
+}
+
+function Assert-LocalePathsDistinct {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+
+    $resolvedSource = Resolve-FullPath $Source
+    $resolvedTarget = Resolve-FullPath $Target
+    $sourceWithSeparator = $resolvedSource.TrimEnd('\') + '\'
+    $targetWithSeparator = $resolvedTarget.TrimEnd('\') + '\'
+    $samePath = [string]::Equals($resolvedSource, $resolvedTarget, [System.StringComparison]::OrdinalIgnoreCase)
+    $sourceContainsTarget = $resolvedTarget.StartsWith($sourceWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)
+    $targetContainsSource = $resolvedSource.StartsWith($targetWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)
+
+    if ($samePath -or $sourceContainsTarget -or $targetContainsSource) {
+        throw "拒绝安装：中文资源来源目录与 VMware 目标目录相同或相互嵌套，可能导致误删。来源：$resolvedSource；目标：$resolvedTarget"
+    }
 }
 
 function Assert-VmwareStopped {
@@ -54,11 +205,15 @@ function Assert-VmwareStopped {
 function Assert-LocaleSource {
     param([Parameter(Mandatory = $true)][string]$Source)
 
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "未找到中文资源目录：$Source。请将与当前 VMware 版本匹配的资源放入仓库 resources\zh_CN，或使用 -SourceLocalePath 指定目录。"
+    }
+
     $requiredFiles = @('vmappsdk-zh_CN.dll', 'vmui-zh_CN.dll', 'vmware.vmsg')
     foreach ($file in $requiredFiles) {
         $path = Join-Path $Source $file
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            throw "中文资源缺失：$path"
+            throw "中文资源缺失：$path。请将 vmappsdk-zh_CN.dll、vmui-zh_CN.dll 和 vmware.vmsg 放入资源目录。"
         }
     }
 }
@@ -92,10 +247,12 @@ function Install-Locale {
     )
 
     Assert-VmwareStopped
-    Assert-LocaleSource $Source
 
     $messagesPath = Join-Path $Root 'messages'
     $targetLocalePath = Join-Path $messagesPath 'zh_CN'
+    Assert-LocalePathsDistinct -Source $Source -Target $targetLocalePath
+    Assert-LocaleSource $Source
+
     $preferencePath = Get-PreferencePath
     $backupRoot = Get-DefaultBackupRoot
     $backupPathLocal = Join-Path $backupRoot (Get-Date -Format 'yyyyMMdd-HHmmss')
@@ -152,7 +309,11 @@ function Install-Locale {
         Write-Utf8NoBom $preferencePath $content
     }
 
-    Write-Output "安装完成。备份目录：$backupPathLocal"
+    if ($WhatIfPreference) {
+        Write-Output '预演完成，未修改任何文件。'
+    } else {
+        Write-Output "安装完成。备份目录：$backupPathLocal"
+    }
 }
 
 function Restore-Locale {
@@ -222,14 +383,19 @@ function Restore-Locale {
     Write-Output "恢复完成。使用备份：$restorePath"
 }
 
-$resolvedVmwareRoot = Assert-VmwareRoot $VmwareRoot
-if (-not $SourceLocalePath) {
-    $SourceLocalePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'resources\zh_CN'
-}
-$resolvedSource = Resolve-FullPath $SourceLocalePath
+try {
+    $resolvedVmwareRoot = Assert-VmwareRoot $VmwareRoot
 
-if ($Action -eq 'Install') {
-    Install-Locale -Root $resolvedVmwareRoot -Source $resolvedSource
-} else {
-    Restore-Locale -Root $resolvedVmwareRoot -RequestedBackupPath $BackupPath
+    if ($Action -eq 'Install') {
+        if (-not $SourceLocalePath) {
+            $SourceLocalePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'resources\zh_CN'
+        }
+        $resolvedSource = Resolve-FullPath $SourceLocalePath
+        Install-Locale -Root $resolvedVmwareRoot -Source $resolvedSource
+    } else {
+        Restore-Locale -Root $resolvedVmwareRoot -RequestedBackupPath $BackupPath
+    }
+} catch {
+    [Console]::Error.WriteLine(('错误：{0}' -f $_.Exception.Message))
+    exit 1
 }
